@@ -24,9 +24,7 @@ from phoenixdb import errors
 from phoenixdb.avatica.proto import requests_pb2, common_pb2, responses_pb2
 
 import requests
-#from requests_gssapi import HTTPSPNEGOAuth, OPTIONAL
-from requests_kerberos import HTTPKerberosAuth, OPTIONAL
-import kerberos
+from requests_gssapi import HTTPSPNEGOAuth, OPTIONAL
 
 try:
     import urlparse
@@ -159,31 +157,28 @@ class AvaticaClient(object):
         pass
 
     def _post_request(self, body, headers):
-        retry_count = self.max_retries
-        while True:
+        req_kwargs = {'data': body, 'stream': True, 'headers': headers}
+        if self.auth == "SPENGO":
+            req_kwargs['auth'] = HTTPSPNEGOAuth(mutual_authentication=OPTIONAL)
+
+        def retry_delay(msg):
+            delay = math.exp(-retry_count)
+            logger.debug("%s, will retry in %s seconds...", msg, delay, exc_info=True)
+            time.sleep(delay)
+
+        for retry_count in reversed(range(self.max_retries)):
             logger.debug("POST %s %r %r", self.url.geturl(), body, headers)
             try:
-                if self.auth == "SPNEGO":
-                    #response = requests.request('post', self.url.geturl(), data=body, stream=True, headers=headers, auth=HTTPSPNEGOAuth(mutual_authentication=OPTIONAL))
-                    response = requests.request('post', self.url.geturl(), data=body, stream=True, headers=headers, auth=HTTPKerberosAuth(mutual_authentication=OPTIONAL, mech_oid=kerberos.GSS_MECH_OID_SPNEGO))
-                else:
-                    response = requests.request('post', self.url.geturl(), data=body, stream=True, headers=headers)
-
+                response = requests.post(self.url.geturl(), **req_kwargs)
             except requests.HTTPError as e:
                 if retry_count > 0:
-                    delay = math.exp(-retry_count)
-                    logger.debug("HTTP protocol error, will retry in %s seconds...", delay, exc_info=True)
-                    time.sleep(delay)
-                    retry_count -= 1
+                    retry_delay("HTTP protocol error")
                     continue
                 raise errors.InterfaceError('RPC request failed', cause=e)
             else:
                 if response.status_code == requests.codes.service_unavailable:
                     if retry_count > 0:
-                        delay = math.exp(-retry_count)
-                        logger.debug("Service unavailable, will retry in %s seconds...", delay, exc_info=True)
-                        time.sleep(delay)
-                        retry_count -= 1
+                        retry_delay("Service unavailable")
                         continue
                 return response
 
